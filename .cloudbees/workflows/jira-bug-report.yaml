@@ -4,9 +4,7 @@ name: Jira Bug Aging Report
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+  
 
 jobs:
   generate-bug-report:
