@@ -1,0 +1,36 @@
+name: Jira Bug Summarizer
+
+on:
+  #schedule:
+    #- cron: '0 9 * * 1-5'  # Run weekdays at 9 AM
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  summarize-bugs:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          cd jira-to-slack
+          pip install -r requirements.txt
+      
+      - name: Run summarizer
+        env:
+          JIRA_URL: ${{ secrets.JIRA_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+        run: |
+          cd jira-to-slack
+          python jira_bug_summarizer.py
