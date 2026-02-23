@@ -40,6 +40,7 @@ jobs:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           AWS_REGION: us-east-1
           BEDROCK_MODEL_ID: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+          AWS_PROFILE: cloudbees-bedrock-claude-infra-bedrock-claude-user
         run: |
           echo "Setting up environment..."
           python -m pip install --upgrade pip
