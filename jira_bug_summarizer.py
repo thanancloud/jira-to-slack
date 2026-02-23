@@ -38,8 +38,15 @@ class JiraBugSummarizer:
             options={'rest_api_version': '3'}
         )
 
-        # Initialize AWS session with profile
-        session = boto3.Session(profile_name=self.aws_profile, region_name=self.aws_region)
+        # Initialize AWS session
+        # In CI with OIDC, credentials come from environment variables (no profile needed)
+        # In local development, use profile if AWS_PROFILE is set and no OIDC credentials exist
+        if self.aws_profile and self.aws_profile != "default" and not os.getenv("AWS_SESSION_TOKEN"):
+            # Use profile for local development
+            session = boto3.Session(profile_name=self.aws_profile, region_name=self.aws_region)
+        else:
+            # Use default credentials chain (OIDC env vars in CI, or default profile locally)
+            session = boto3.Session(region_name=self.aws_region)
         self.bedrock_client = session.client('bedrock-runtime')
     
     def _validate_credentials(self):
