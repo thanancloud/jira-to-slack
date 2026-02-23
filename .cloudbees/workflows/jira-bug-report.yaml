@@ -5,6 +5,9 @@ name: Jira Bug Aging Report
 on:
   workflow_dispatch:
   
+permissions:
+  id-token: write   # This is required to request the JWT
+  contents: read    # This is required for actions/checkout
 
 jobs:
   generate-bug-report:
