@@ -27,6 +27,8 @@ class JiraBugSummarizer:
         self.aws_region = os.getenv("AWS_REGION", "us-east-1")
         self.bedrock_model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
         self.slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+        self.jql_query = os.getenv("JIRA_JQL", "labels = qa_automation AND type = Bug AND status != Done AND status != Rejected")
+        self.team_field_id = None  # Cache for team field ID
 
         # Validate required credentials
         self._validate_credentials()
@@ -62,14 +64,49 @@ class JiraBugSummarizer:
             print(f"Error: Missing required environment variables: {', '.join(missing)}")
             sys.exit(1)
     
-    def fetch_bugs(self, jql: str, max_results: int = 20) -> List:
+    def get_team_field_id(self) -> str:
+        """Find the custom field ID for Team in Jira"""
+        try:
+            # Get all fields from Jira using REST API
+            all_fields = self.jira.fields()
+
+            # Look for the Atlassian Team field (customfield_12000)
+            # Schema type: "team", Custom: "com.atlassian.jira.plugin.system.customfieldtypes:atlassian-team"
+            for field in all_fields:
+                schema = field.get('schema', {})
+                schema_type = schema.get('type', '')
+                custom_type = schema.get('custom', '')
+
+                # Check for Atlassian Team field
+                if (schema_type == 'team' and
+                    'atlassian-team' in custom_type):
+                    field_id = field.get('id')
+                    print(f"Found Atlassian Team field: {field['name']} (ID: {field_id})")
+                    return field_id
+
+            print("Atlassian Team field not found, will use components/labels")
+            return None
+        except Exception as e:
+            print(f"Error getting team field ID: {e}")
+            return None
+
+    def fetch_bugs(self, jql: str, max_results: int = 5) -> List:
         """Fetch bugs from Jira using JQL query"""
         print(f"Fetching bugs with JQL: {jql}")
         try:
+            # Get team field ID (only once)
+            if self.team_field_id is None:
+                self.team_field_id = self.get_team_field_id()
+
+            # Build fields list
+            fields = "key,summary,status,priority,assignee,reporter,comment,created,updated,components,labels,customfield_10020"
+            if self.team_field_id:
+                fields += f",{self.team_field_id}"
+
             issues = self.jira.search_issues(
                 jql_str=jql,
                 maxResults=max_results,
-                fields="key,summary,status,priority,assignee,reporter,comment,created,updated,components,labels,customfield_10020"
+                fields=fields
             )
             print(f"Found {len(issues)} bugs")
             return issues
@@ -129,11 +166,51 @@ class JiraBugSummarizer:
             print(f"Error calculating bug aging: {e}")
             return 0
 
+    def get_team_from_issue(self, issue) -> str:
+        """Extract Team field value from Jira issue (Atlassian Team field)"""
+        if not self.team_field_id:
+            return None
+
+        try:
+            # Get the team field value using the field ID
+            # Replace hyphen with underscore for attribute access
+            field_attr = self.team_field_id.replace('-', '_')
+            team_value = getattr(issue.fields, field_attr, None)
+
+            if not team_value:
+                return None
+
+            # Atlassian Team field returns a PropertyHolder object with:
+            # - name: Team name (e.g., "CBP Ninja")
+            # - title: Team title (usually same as name)
+            # - id: Team ID
+            # - avatarUrl, isVisible, isVerified, isShared
+            if hasattr(team_value, 'name') and team_value.name:
+                return team_value.name
+
+            # Fallback: try title
+            if hasattr(team_value, 'title') and team_value.title:
+                return team_value.title
+
+            # If neither works, try string conversion
+            team_str = str(team_value)
+            if team_str and not team_str.startswith('<'):
+                return team_str
+
+            return None
+
+        except Exception as e:
+            print(f"Error extracting team from issue {issue.key}: {e}")
+            return None
+
     def structure_bug_data(self, issue, comments: List[Dict], summary: str) -> Dict:
         """Structure bug data into JSON format"""
         # Calculate bug aging
         created_date = issue.fields.created if hasattr(issue.fields, 'created') else None
         bug_age_days = self.calculate_bug_aging(created_date) if created_date else 0
+
+        # Get team field value
+        team_name = self.get_team_from_issue(issue)
 
         # Get team/components
         components = []
@@ -145,8 +222,9 @@ class JiraBugSummarizer:
         if hasattr(issue.fields, 'labels') and issue.fields.labels:
             labels = issue.fields.labels
 
-        # Team information (combine components and labels)
+        # Team information (prioritize team field, then components and labels)
         team_info = {
+            "team_name": team_name,
             "components": components,
             "labels": labels
         }
@@ -246,10 +324,57 @@ Provide a concise summary in 3-5 bullet points."""
             print(f"Error summarizing comments for {bug_key}: {e}")
             return "Failed to generate summary."
     
+    def sort_bugs_by_priority(self, all_bug_data: List[Dict]) -> List[Dict]:
+        """Sort bugs by priority (Highest to Lowest)"""
+        priority_order = {
+            "Highest": 1,
+            "High": 2,
+            "Medium": 3,
+            "Low": 4,
+            "Lowest": 5,
+            "Unknown": 6
+        }
+
+        return sorted(all_bug_data, key=lambda bug: priority_order.get(bug['priority'], 6))
+
+    def format_team_info(self, team_data: Dict) -> str:
+        """Format team information for display"""
+        # Priority 1: Use team_name field if available (starts with CBP)
+        if team_data.get('team_name'):
+            team_str = team_data['team_name']
+            if len(team_str) > 18:
+                team_str = team_str[:15] + "..."
+            return team_str
+
+        # Priority 2: Fall back to components and labels
+        team_parts = []
+
+        # Add components if available
+        if team_data.get('components'):
+            team_parts.extend(team_data['components'])
+
+        # Add labels if available (limit to 2 for space)
+        if team_data.get('labels'):
+            labels = team_data['labels'][:2]  # Take first 2 labels
+            team_parts.extend(labels)
+
+        if not team_parts:
+            return "N/A"
+
+        # Join and truncate if too long
+        team_str = ", ".join(team_parts)
+        if len(team_str) > 18:
+            team_str = team_str[:15] + "..."
+
+        return team_str
+
     def format_slack_table(self, all_bug_data: List[Dict]) -> str:
         """Format all bug data into a rows and columns table"""
         if not all_bug_data:
             return "No bugs found."
+
+        # Sort bugs by priority
+        all_bug_data = self.sort_bugs_by_priority(all_bug_data)
 
         # Header
         message = """*🐛 JIRA BUG SUMMARY REPORT*
@@ -257,11 +382,11 @@ _Report generated on {}_
 
 """.format(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
 
-        # Table header (removed Summary column)
+        # Table header (added Teams column)
         table_header = """```
-┌────┬─────────────┬───────────┬─────────────┬──────────┬──────────┬────────────────┐
-│ #  │ Ticket ID   │ Days Open │ Last Update │ Status   │ Priority │ Assignee       │
-├────┼─────────────┼───────────┼─────────────┼──────────┼──────────┼────────────────┤"""
+┌────┬─────────────┬───────────┬─────────────┬──────────┬──────────┬────────────────────┬────────────────┐
+│ #  │ Ticket ID   │ Days Open │ Last Update │ Status   │ Priority │ Teams              │ Assignee       │
+├────┼─────────────┼───────────┼─────────────┼──────────┼──────────┼────────────────────┼────────────────┤"""
 
         message += table_header + "\n"
 
@@ -292,14 +417,15 @@ _Report generated on {}_
             days_str = f"{age_emoji} {str(days_open).rjust(3)}"[:9].ljust(9)
             status = bug['status'][:8].ljust(8)
             priority = bug['priority'][:8].ljust(8)
+            teams = self.format_team_info(bug['team'])[:18].ljust(18)
             assignee = bug['assignee']['name'][:14].ljust(14)
 
-            # Create row (removed summary column)
-            row = f"│ {str(idx).rjust(2)} │ {ticket_id} │ {days_str} │ {last_updated_str} │ {status} │ {priority} │ {assignee} │\n"
+            # Create row (added Teams column)
+            row = f"│ {str(idx).rjust(2)} │ {ticket_id} │ {days_str} │ {last_updated_str} │ {status} │ {priority} │ {teams} │ {assignee} │\n"
             message += row
 
-        # Table footer (removed Summary column)
-        table_footer = """└────┴─────────────┴───────────┴─────────────┴──────────┴──────────┴────────────────┘
+        # Table footer (added Teams column)
+        table_footer = """└────┴─────────────┴───────────┴─────────────┴──────────┴──────────┴────────────────────┴────────────────┘
 ```
 """
         message += table_footer
@@ -400,14 +526,12 @@ _Report generated on {}_
     
     def run(self):
         """Main execution flow"""
-        jql = 'labels = qa_automation AND type = Bug AND status != Done AND status != Rejected'
-
         print("=" * 50)
         print("Starting Jira Bug Summarizer")
         print("=" * 50)
 
-        # Fetch bugs
-        bugs = self.fetch_bugs(jql)
+        # Fetch bugs using JQL from environment variable
+        bugs = self.fetch_bugs(self.jql_query)
 
         if not bugs:
             print("No bugs found. Exiting.")
