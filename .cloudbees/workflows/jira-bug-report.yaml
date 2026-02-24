@@ -51,8 +51,10 @@ jobs:
 
       - name: Display report summary
         uses: docker://golang:1.20.3-alpine3.17
-        shell: sh  # ✅ ADDED: Explicit shell directive
+        id: reports
+        shell: sh  
         run: |
+          cat bug_report.txt > "$CLOUDBEES_OUTPUTS/report"
           echo "📊 Generated Reports:"
           if [ -f bug_report.json ]; then
             echo "✅ bug_report.json ($(wc -l < bug_report.json) lines)"
@@ -68,21 +70,6 @@ jobs:
         uses: cloudbees-io/publish-evidence-item@v1
         with:
          content: |-
-           ## Jira Bug Report Generated
-          
-           **Workflow Version**: ${{cloudbees.version}}
-           **Timestamp**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-           Reports generated successfully:
-           - bug_report.json
-           - bug_report.txt
+          ${{ steps.reports.outputs.report }}
 
-      - name: Archive reports with timestamp
-        uses: docker://golang:1.20.3-alpine3.17
-        shell: sh  # ✅ ADDED: Explicit shell directive
-        run: |
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          mkdir -p reports_archive
-          cp bug_report.json reports_archive/bug_report_${TIMESTAMP}.json
-          cp bug_report.txt reports_archive/bug_report_${TIMESTAMP}.txt
-          echo "✅ Reports archived with timestamp: ${TIMESTAMP}"
+     
